@@ -24,6 +24,7 @@ For official tools and support, please visit [Mistral AI's website](https://mist
 - 🎯 **Smart Output**: Preserves document structure in markdown format
 - 🖼️ **Image Extraction**: Optionally extract and save embedded images
 - 📚 **PDF Upload + Chunking**: Upload PDFs via Mistral files API and split large page ranges automatically
+- 📦 **Batch API Option**: Submit OCR work through Mistral Batch Inference when your account supports it
 - 📈 **Progress Tracking**: Real-time progress bars for batch operations
 - 🔧 **Flexible Configuration**: Environment variables or command-line options
 
@@ -110,6 +111,7 @@ Options:
   -o, --output-path PATH      Output directory (default: <input_dir>/mistral_ocr_output/)
   --api-key TEXT             Mistral API key (or set MISTRAL_API_KEY env var)
   --model TEXT               OCR model (default: mistral-ocr-latest)
+  --mode [direct|batch]      Processing mode: direct OCR calls or Batch API
   --env-file PATH            Path to .env file
   --include-images/--no-images  Extract images (default: True)
   --max-pages INTEGER        Maximum PDF pages to process; use 0 to disable the limit
@@ -149,6 +151,14 @@ mistral-ocr document.pdf --no-images
 ```bash
 mistral-ocr document.pdf --max-pages 25
 ```
+
+### Submit OCR through the Batch API
+
+```bash
+mistral-ocr ./documents --mode batch --output-path ./batch_results
+```
+
+If your API key/account does not support batch jobs, the CLI reports that clearly and suggests rerunning without `--mode batch`.
 
 ### Pass API key directly (not recommended for production)
 
@@ -198,6 +208,7 @@ The `metadata.json` file contains:
 
 PDFs are uploaded through the Mistral files API and processed in chunks when needed.
 The `--max-pages` option caps total PDF pages processed; use `0` to disable the cap.
+`--mode batch` submits the same OCR requests through Mistral Batch Inference instead of immediate OCR calls.
 
 ## Pricing
 

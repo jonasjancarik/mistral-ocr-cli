@@ -14,6 +14,7 @@ class Config:
     
     api_key: str
     model: str = "mistral-ocr-latest"
+    mode: str = "direct"
     max_file_size_mb: int = 50
     max_pages: int = 1000
     output_format: str = "markdown"
@@ -38,6 +39,7 @@ class Config:
         return cls(
             api_key=api_key,
             model=os.getenv("MISTRAL_MODEL", "mistral-ocr-latest"),
+            mode=os.getenv("MISTRAL_MODE", "direct"),
             max_file_size_mb=int(os.getenv("MAX_FILE_SIZE_MB", "50")),
             max_pages=int(os.getenv("MAX_PAGES", "1000")),
             output_format=os.getenv("OUTPUT_FORMAT", "markdown"),
