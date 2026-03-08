@@ -59,6 +59,18 @@ ORIGINAL_CWD = os.environ.get('MISTRAL_OCR_CWD', os.getcwd())
     help="Include extracted images in output (default: True)"
 )
 @click.option(
+    "--metadata/--no-metadata",
+    "include_metadata",
+    default=True,
+    help="Include the markdown metadata header block (default: True)"
+)
+@click.option(
+    "--page-headings/--no-page-headings",
+    "include_page_headings",
+    default=True,
+    help="Include markdown headings for each OCR page (default: True)"
+)
+@click.option(
     "--max-pages",
     type=click.IntRange(min=0),
     required=False,
@@ -89,6 +101,8 @@ def main(
     mode: str,
     env_file: Optional[Path],
     include_images: bool,
+    include_metadata: bool,
+    include_page_headings: bool,
     max_pages: Optional[int],
     add_timestamp: bool,
     reprocess: bool,
@@ -147,6 +161,8 @@ def main(
         config.model = model
         config.mode = mode.lower()
         config.include_images = include_images
+        config.include_metadata = include_metadata
+        config.include_page_headings = include_page_headings
         if max_pages is not None:
             config.max_pages = max_pages
         config.verbose = verbose
