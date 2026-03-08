@@ -42,6 +42,13 @@ ORIGINAL_CWD = os.environ.get('MISTRAL_OCR_CWD', os.getcwd())
     help="Mistral OCR model to use (default: mistral-ocr-latest)"
 )
 @click.option(
+    "--mode",
+    type=click.Choice(["direct", "batch"], case_sensitive=False),
+    default="direct",
+    show_default=True,
+    help="Processing mode: direct OCR calls or Batch API"
+)
+@click.option(
     "--env-file",
     type=click.Path(exists=True, path_type=Path),
     help="Path to .env file containing configuration"
@@ -79,6 +86,7 @@ def main(
     output_path: Optional[Path],
     api_key: Optional[str],
     model: str,
+    mode: str,
     env_file: Optional[Path],
     include_images: bool,
     max_pages: Optional[int],
@@ -137,6 +145,7 @@ def main(
         
         # Override config with CLI options
         config.model = model
+        config.mode = mode.lower()
         config.include_images = include_images
         if max_pages is not None:
             config.max_pages = max_pages
