@@ -1,13 +1,21 @@
 """Core OCR processing module using Mistral AI."""
 
 import random
+import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 
 from mistralai import Mistral
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeRemainingColumn,
+)
 
 from .config import Config
 from .utils import (
@@ -15,15 +23,18 @@ from .utils import (
     determine_output_path,
     format_file_size,
     get_image_base64_data,
+    get_pdf_page_count,
     get_supported_files,
     load_metadata,
     sanitize_filename,
     save_base64_image,
     save_metadata,
+    split_pdf_into_chunks,
 )
 
 
 console = Console()
+PDF_REQUEST_PAGE_LIMIT = 1000
 
 
 def _is_retryable_ocr_error(error: Exception) -> bool:
@@ -35,7 +46,7 @@ def _is_retryable_ocr_error(error: Exception) -> bool:
 
 class OCRProcessor:
     """OCR processor using Mistral AI API."""
-    
+
     def __init__(self, config: Config):
         """Initialize the OCR processor."""
         self.config = config
@@ -46,63 +57,47 @@ class OCRProcessor:
             raise
         self.errors: List[Dict] = []
         self.processed_files: List[Dict] = []
-    
+
     def process_file(self, file_path: Path) -> Optional[Dict]:
         """Process a single file with OCR."""
         try:
-            # Validate file size
             file_size_mb = file_path.stat().st_size / (1024 * 1024)
             if self.config.verbose:
                 console.print(f"[dim]File size: {file_size_mb:.2f} MB[/dim]")
-            self.config.validate_file_size(file_path)
-            
-            # Create data URI for the file
-            if self.config.verbose:
-                console.print(f"[dim]Creating data URI for {file_path.suffix} file...[/dim]")
-            data_uri = create_data_uri(file_path)
-            
-            # Determine document type based on file extension
-            if file_path.suffix.lower() == ".pdf":
-                document = {
-                    "type": "document_url",
-                    "document_url": data_uri
-                }
-            else:
-                document = {
-                    "type": "image_url",
-                    "image_url": data_uri
-                }
-            
-            # Process with Mistral OCR
-            if not hasattr(self.client, 'ocr'):
+
+            if not hasattr(self.client, "ocr"):
                 raise AttributeError(
                     "OCR endpoint not available in Mistral client. "
                     "Please ensure you have the latest mistralai package "
                     "and OCR access enabled for your API key."
                 )
-            
+
             if self.config.verbose:
-                console.print(f"[dim]Sending to Mistral OCR API...[/dim]")
+                console.print("[dim]Sending to Mistral OCR API...[/dim]")
                 console.print(f"[dim]Model: {self.config.model}[/dim]")
-            
-            response = self._process_with_retry(document)
-            
+
+            if file_path.suffix.lower() == ".pdf":
+                response = self._process_pdf_file(file_path)
+            else:
+                self.config.validate_file_size(file_path)
+                response = self._process_image_file(file_path)
+
             return {
                 "file_path": file_path,
                 "response": response,
-                "success": True
+                "success": True,
             }
-            
+
         except Exception as e:
             error_msg = f"Error processing {file_path.name}: {str(e)}"
-            # Always show errors, not just in verbose mode
             console.print(f"[red]{error_msg}[/red]")
             if self.config.verbose:
                 import traceback
+
                 console.print(f"[dim]{traceback.format_exc()}[/dim]")
             self.errors.append({
                 "file": str(file_path),
-                "error": str(e)
+                "error": str(e),
             })
             return None
 
@@ -116,7 +111,7 @@ class OCRProcessor:
                 return self.client.ocr.process(
                     model=self.config.model,
                     document=document,
-                    include_image_base64=self.config.include_images
+                    include_image_base64=self.config.include_images,
                 )
             except Exception as error:
                 if attempt >= max_retries or not _is_retryable_ocr_error(error):
@@ -129,83 +124,150 @@ class OCRProcessor:
                         f"({attempt + 1}/{max_retries})[/yellow]"
                     )
                 time.sleep(delay)
-    
+
+        raise RuntimeError("OCR retry loop exited unexpectedly")
+
+    def _process_image_file(self, file_path: Path) -> object:
+        """Process an image file through the OCR API."""
+        if self.config.verbose:
+            console.print(f"[dim]Creating data URI for {file_path.suffix} file...[/dim]")
+
+        data_uri = create_data_uri(file_path)
+        return self._process_with_retry(
+            {
+                "type": "image_url",
+                "image_url": data_uri,
+            }
+        )
+
+    def _process_pdf_file(self, file_path: Path) -> object:
+        """Process a PDF file via uploaded file chunks."""
+        page_limit = self.config.max_pages_limit
+        page_count = get_pdf_page_count(file_path)
+
+        with tempfile.TemporaryDirectory(prefix="mistral_ocr_") as temp_dir:
+            chunks = split_pdf_into_chunks(
+                file_path,
+                Path(temp_dir),
+                max_pages_per_chunk=PDF_REQUEST_PAGE_LIMIT,
+                max_chunk_size_mb=self.config.max_file_size_mb,
+                max_pages=page_limit,
+            )
+
+            combined_pages = []
+            for chunk_path, start_page, _page_count in chunks:
+                uploaded_file_id = None
+                try:
+                    with open(chunk_path, "rb") as handle:
+                        uploaded = self.client.files.upload(
+                            file={"file_name": chunk_path.name, "content": handle},
+                            purpose="ocr",
+                        )
+                    uploaded_file_id = uploaded.id
+
+                    response = self._process_with_retry(
+                        {"type": "file", "file_id": uploaded.id}
+                    )
+                finally:
+                    if uploaded_file_id:
+                        self._delete_uploaded_file(uploaded_file_id)
+
+                for local_index, page in enumerate(getattr(response, "pages", [])):
+                    page_index = start_page + getattr(page, "index", local_index)
+                    combined_pages.append(
+                        SimpleNamespace(
+                            index=page_index,
+                            markdown=getattr(page, "markdown", ""),
+                            images=getattr(page, "images", []),
+                        )
+                    )
+
+        truncated_message = None
+        if page_limit and page_count > page_limit:
+            truncated_message = (
+                f"Document truncated to first {page_limit} of {page_count} pages."
+            )
+
+        return SimpleNamespace(pages=combined_pages, truncated_message=truncated_message)
+
+    def _delete_uploaded_file(self, file_id: str) -> None:
+        """Best-effort cleanup for uploaded OCR files."""
+        try:
+            self.client.files.delete(file_id=file_id)
+        except Exception:
+            if self.config.verbose:
+                console.print(f"[dim]Failed to delete uploaded OCR file: {file_id}[/dim]")
+
     def save_results(
-        self, 
-        result: Dict, 
+        self,
+        result: Dict,
         output_dir: Path,
-        is_single_file: bool = False
+        is_single_file: bool = False,
     ) -> None:
         """Save OCR results to files."""
         file_path = result["file_path"]
         response = result["response"]
-        
-        # Always use the original filename (just sanitized, no truncation)
+
         base_name = sanitize_filename(file_path.stem, max_length=None)
         markdown_path = output_dir / f"{base_name}.md"
-        
+
         markdown_content = []
-        
-        # Add file header
-        markdown_content.append(f"# OCR Results\n\n")
+        markdown_content.append("# OCR Results\n\n")
         markdown_content.append(f"**Original File:** {file_path.name}\n")
         markdown_content.append(f"**Full Path:** `{file_path}`\n")
         markdown_content.append(f"**Processed:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        if getattr(response, "truncated_message", None):
+            markdown_content.append(f"**Note:** {response.truncated_message}\n\n")
         markdown_content.append("---\n\n")
-        
-        # Process each page
-        if hasattr(response, 'pages'):
+
+        if hasattr(response, "pages"):
             for page in response.pages:
                 markdown_content.append(f"## Page {page.index + 1}\n\n")
-                
-                # Add extracted text
-                if hasattr(page, 'markdown'):
+
+                if hasattr(page, "markdown"):
                     markdown_content.append(page.markdown)
                     markdown_content.append("\n\n")
-                
-                # Save images if included
-                if self.config.include_images and hasattr(page, 'images') and page.images:
+
+                if self.config.include_images and hasattr(page, "images") and page.images:
                     images_dir = output_dir / "images"
                     images_dir.mkdir(parents=True, exist_ok=True)
-                    
+
                     for idx, image in enumerate(page.images):
                         image_base64 = get_image_base64_data(image)
                         if image_base64:
                             image_filename = f"page{page.index + 1}_img{idx + 1}.png"
                             image_path = images_dir / image_filename
                             save_base64_image(image_base64, image_path)
-                            
-                            # Add image reference to markdown
-                            markdown_content.append(f"![Image {idx + 1}](./images/{image_filename})\n\n")
-        
-        # Write markdown file
+
+                            markdown_content.append(
+                                f"![Image {idx + 1}](./images/{image_filename})\n\n"
+                            )
+
         with open(markdown_path, "w", encoding="utf-8") as f:
             f.write("".join(markdown_content))
-        
+
         if self.config.verbose:
             console.print(f"[green]✓[/green] Saved results to {markdown_path}")
-    
+
     def process_directory(
-        self, 
-        input_dir: Path, 
+        self,
+        input_dir: Path,
         output_dir: Optional[Path] = None,
         add_timestamp: bool = False,
-        reprocess: bool = False
+        reprocess: bool = False,
     ) -> Tuple[int, int]:
         """Process all supported files in a directory."""
         files = get_supported_files(input_dir)
-        
+
         if not files:
             console.print("[yellow]No supported files found in the directory.[/yellow]")
             return 0, 0
-        
+
         output_path = determine_output_path(input_dir, output_dir, add_timestamp=add_timestamp)
-        
-        # Load existing metadata to check for already processed files
+
         existing_metadata = load_metadata(output_path)
         existing_files_set = {item["file"] for item in existing_metadata["files_processed"]}
-        
-        # Filter files based on reprocess flag
+
         files_to_process = []
         skipped_files = []
         for file_path in files:
@@ -215,39 +277,39 @@ class OCRProcessor:
                     console.print(f"[dim]Skipping already processed: {file_path.name}[/dim]")
             else:
                 files_to_process.append(file_path)
-        
+
         if skipped_files:
             console.print(f"[yellow]Skipping {len(skipped_files)} already processed file(s)[/yellow]")
             if not self.config.verbose:
                 console.print("[dim]Use --verbose to see which files were skipped[/dim]")
-        
+
         if not files_to_process:
             console.print("[green]All files already processed. Use --reprocess to force reprocessing.[/green]")
             return 0, 0
-        
+
         console.print(f"[blue]Processing {len(files_to_process)} file(s)...[/blue]")
         console.print(f"[blue]Output directory: {output_path}[/blue]\n")
-        
+
         start_time = time.time()
         success_count = 0
-        
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
             TimeRemainingColumn(),
-            console=console
+            console=console,
         ) as progress:
             task = progress.add_task("Processing files...", total=len(files_to_process))
-            
+
             for file_path in files_to_process:
                 file_size = format_file_size(file_path.stat().st_size)
                 progress.update(
-                    task, 
-                    description=f"Processing {file_path.name} ({file_size})..."
+                    task,
+                    description=f"Processing {file_path.name} ({file_size})...",
                 )
-                
+
                 result = self.process_file(file_path)
                 if result:
                     self.save_results(result, output_path, is_single_file=False)
@@ -256,33 +318,30 @@ class OCRProcessor:
                     self.processed_files.append({
                         "file": str(file_path),
                         "size": file_path.stat().st_size,
-                        "output": str(output_path / f"{base_name}.md")
+                        "output": str(output_path / f"{base_name}.md"),
                     })
-                
+
                 progress.update(task, advance=1)
-        
-        # Save metadata
+
         processing_time = time.time() - start_time
         save_metadata(output_path, self.processed_files, processing_time, self.errors)
-        
+
         return success_count, len(files_to_process)
-    
+
     def process(
-        self, 
-        input_path: Path, 
+        self,
+        input_path: Path,
         output_path: Optional[Path] = None,
         add_timestamp: bool = False,
-        reprocess: bool = False
+        reprocess: bool = False,
     ) -> None:
         """Process input path (file or directory)."""
         if input_path.is_file():
-            # Process single file
             output_dir = determine_output_path(input_path, output_path, add_timestamp=add_timestamp)
-            
-            # Check if file already processed
+
             existing_metadata = load_metadata(output_dir)
             existing_files_set = {item["file"] for item in existing_metadata["files_processed"]}
-            
+
             if str(input_path) in existing_files_set and not reprocess:
                 base_name = sanitize_filename(input_path.stem, max_length=None)
                 output_file = output_dir / f"{base_name}.md"
@@ -290,38 +349,38 @@ class OCRProcessor:
                 console.print(f"[dim]Output exists at: {output_file}[/dim]")
                 console.print("[dim]Use --reprocess to force reprocessing.[/dim]")
                 return
-            
+
             console.print(f"[blue]Processing file: {input_path}[/blue]")
             console.print(f"[blue]Output directory: {output_dir}[/blue]\n")
-            
+
             start_time = time.time()
             result = self.process_file(input_path)
-            
+
             if result:
                 self.save_results(result, output_dir, is_single_file=True)
                 base_name = sanitize_filename(input_path.stem, max_length=None)
                 self.processed_files.append({
                     "file": str(input_path),
                     "size": input_path.stat().st_size,
-                    "output": str(output_dir / f"{base_name}.md")
+                    "output": str(output_dir / f"{base_name}.md"),
                 })
-                
-                # Save metadata
+
                 processing_time = time.time() - start_time
                 save_metadata(output_dir, self.processed_files, processing_time, self.errors)
-                
-                console.print(f"\n[green]✓ Successfully processed 1 file[/green]")
+
+                console.print("\n[green]✓ Successfully processed 1 file[/green]")
                 console.print(f"[dim]Processing time: {processing_time:.2f} seconds[/dim]")
             else:
-                console.print(f"\n[red]✗ Failed to process file[/red]")
-        
+                console.print("\n[red]✗ Failed to process file[/red]")
+
         elif input_path.is_dir():
-            # Process directory
-            success_count, total_count = self.process_directory(input_path, output_path, add_timestamp, reprocess)
-            
+            success_count, total_count = self.process_directory(
+                input_path, output_path, add_timestamp, reprocess
+            )
+
             console.print(f"\n[green]✓ Successfully processed {success_count}/{total_count} files[/green]")
             if self.errors:
                 console.print(f"[red]✗ {len(self.errors)} file(s) failed[/red]")
-        
+
         else:
             raise ValueError(f"Input path does not exist: {input_path}")
