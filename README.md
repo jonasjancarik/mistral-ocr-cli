@@ -114,6 +114,8 @@ Options:
   --mode [direct|batch]      Processing mode: direct OCR calls or Batch API
   --env-file PATH            Path to .env file
   --include-images/--no-images  Extract images (default: True)
+  --metadata/--no-metadata   Include the markdown metadata header block (default: True)
+  --page-headings/--no-page-headings  Include markdown headings for each OCR page (default: True)
   --max-pages INTEGER        Maximum PDF pages to process; use 0 to disable the limit
   -v, --verbose              Enable verbose output
   --version                  Show version
@@ -150,6 +152,18 @@ mistral-ocr document.pdf --no-images
 
 ```bash
 mistral-ocr document.pdf --max-pages 25
+```
+
+### Omit markdown page headings
+
+```bash
+mistral-ocr document.pdf --no-page-headings
+```
+
+### Omit the markdown metadata header
+
+```bash
+mistral-ocr document.pdf --no-metadata
 ```
 
 ### Submit OCR through the Batch API
@@ -190,6 +204,10 @@ Each processed document generates a markdown file containing:
 - Tables rendered in markdown format
 - Mathematical equations
 - Image references (if image extraction is enabled)
+
+You can suppress the top markdown metadata block with `--no-metadata`
+and per-page headings such as `## Page 1` with `--no-page-headings`.
+These flags only affect the `.md` body; the sidecar `metadata.json` is still written.
 
 ### Metadata File
 
