@@ -5,7 +5,7 @@ import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from mistralai import Mistral
 from rich.console import Console
@@ -31,7 +31,6 @@ from .utils import (
     save_metadata,
     split_pdf_into_chunks,
 )
-
 
 console = Console()
 PDF_REQUEST_PAGE_LIMIT = 1000
@@ -101,7 +100,7 @@ class OCRProcessor:
             })
             return None
 
-    def _process_with_retry(self, document: Dict) -> object:
+    def _process_with_retry(self, document: Any) -> object:
         """Call Mistral OCR with bounded retry/backoff for transient errors."""
         max_retries = 3
         base_delay_seconds = 0.5
